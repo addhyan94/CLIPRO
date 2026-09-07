@@ -1,63 +1,91 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CLIPRO</title>
-  <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-  <main class="card">
-    <h1>CLIPRO - Media Downloader </h1>
-    <p class="sub">Paste a public media URL and choose your format.</p>
+  <head>
+    <meta charset="UTF-8" />
+    <link
+      rel="apple-touch-icon"
+      sizes="180x180"
+      href="favicon_io/apple-touch-icon.png"
+    />
+    <link
+      rel="icon"
+      type="image/png"
+      sizes="32x32"
+      href="favicon_io/favicon-32x32.png"
+    />
+    <link
+      rel="icon"
+      type="image/png"
+      sizes="16x16"
+      href="favicon_io/favicon-16x16.png"
+    />
+    <link rel="manifest" href="favicon_io/site.webmanifest" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CLIPRO</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main class="card">
+      <h1>CLIPRO - Media Downloader</h1>
+      <p class="sub">Paste a public media URL and choose your format.</p>
 
-    <div class="url-row">
-      <input id="url" type="url" placeholder="Paste YouTube / Instagram / other URL..." />
-      <button id="analyzeBtn">Analyze</button>
-    </div>
-
-    <div id="status" class="status" aria-live="polite"></div>
-
-    <section id="info" class="info hidden">
-      <img id="thumb" alt="Video thumbnail">
-      <div class="details">
-        <label>Title</label>
-        <div id="title" class="value">-</div>
-        <label>Name</label>
-        <div id="uploader" class="value">-</div>
-        <label>From</label>
-        <div id="source" class="value">-</div>
+      <div class="url-row">
+        <input
+          id="url"
+          type="url"
+          placeholder="Paste YouTube / Instagram / other URL..."
+        />
+        <button id="analyzeBtn">Analyze</button>
       </div>
-    </section>
 
-    <section id="options" class="options hidden">
-      <div>
-        <label for="quality">Quality</label>
-        <select id="quality"></select>
-      </div>
-      <div>
-        <label for="fileType">File type</label>
-        <select id="fileType">
-          <option value="mp4">MP4</option>
-          <option value="mp3">MP3</option>
-          <option value="mkv">MKV</option>
-        </select>
-      </div>
-    </section>
+      <div id="status" class="status" aria-live="polite"></div>
 
-    <section id="progressWrap" class="progress-wrap hidden" aria-live="polite">
-      <div class="progress-top">
-        <strong id="progressMessage">Downloading Start...</strong>
-        <strong id="progressPercent">0%</strong>
-      </div>
-      <div class="progress-track">
-        <div id="progressBar" class="progress-bar"></div>
-      </div>
-      <div id="progressMeta" class="progress-meta">Preparing...</div>
-    </section>
+      <section id="info" class="info hidden">
+        <img id="thumb" alt="Video thumbnail" />
+        <div class="details">
+          <label>Title</label>
+          <div id="title" class="value">-</div>
+          <label>Name</label>
+          <div id="uploader" class="value">-</div>
+          <label>From</label>
+          <div id="source" class="value">-</div>
+        </div>
+      </section>
 
-    <button id="downloadBtn" class="download hidden">Download</button>
-  </main>
-  <script src="/static/app.js"></script>
-</body>
+      <section id="options" class="options hidden">
+        <div>
+          <label for="quality">Quality</label>
+          <select id="quality"></select>
+        </div>
+        <div>
+          <label for="fileType">File type</label>
+          <select id="fileType">
+            <option value="mp4">MP4</option>
+            <option value="mp3">MP3</option>
+            <option value="mkv">MKV</option>
+          </select>
+        </div>
+      </section>
+
+      <section
+        id="progressWrap"
+        class="progress-wrap hidden"
+        aria-live="polite"
+      >
+        <div class="progress-top">
+          <strong id="progressMessage">Downloading Start...</strong>
+          <strong id="progressPercent">0%</strong>
+        </div>
+        <div class="progress-track">
+          <div id="progressBar" class="progress-bar"></div>
+        </div>
+        <div id="progressMeta" class="progress-meta">Preparing...</div>
+      </section>
+
+      <button id="downloadBtn" class="download hidden">Download</button>
+      <p class="sub2">Built with ❤️ by Addhyan</p>
+
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
 </html>
