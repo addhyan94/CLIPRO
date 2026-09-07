@@ -2,28 +2,16 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link
-      rel="apple-touch-icon"
-      sizes="180x180"
-      href="favicon_io/apple-touch-icon.png"
-    />
-    <link
-      rel="icon"
-      type="image/png"
-      sizes="32x32"
-      href="favicon_io/favicon-32x32.png"
-    />
-    <link
-      rel="icon"
-      type="image/png"
-      sizes="16x16"
-      href="favicon_io/favicon-16x16.png"
-    />
-    <link rel="manifest" href="favicon_io/site.webmanifest" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/favicon_io/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon_io/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/static/favicon_io/favicon-16x16.png" />
+    <link rel="manifest" href="/static/favicon_io/site.webmanifest" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="CLIPRO — Download and convert public media URLs." />
     <title>CLIPRO</title>
     <link rel="stylesheet" href="/static/style.css" />
   </head>
+
   <body>
     <main class="card">
       <h1>CLIPRO - Media Downloader</h1>
@@ -33,22 +21,27 @@
         <input
           id="url"
           type="url"
+          autocomplete="url"
           placeholder="Paste YouTube / Instagram / other URL..."
         />
-        <button id="analyzeBtn">Analyze</button>
+        <button id="analyzeBtn" type="button">Analyze</button>
       </div>
 
       <div id="status" class="status" aria-live="polite"></div>
 
       <section id="info" class="info hidden">
-        <img id="thumb" alt="Video thumbnail" />
+        <img id="thumb" alt="Media thumbnail" />
         <div class="details">
           <label>Title</label>
           <div id="title" class="value">-</div>
+
           <label>Name</label>
           <div id="uploader" class="value">-</div>
+
           <label>From</label>
           <div id="source" class="value">-</div>
+
+          <div id="playlistBadge" class="playlist-badge hidden"></div>
         </div>
       </section>
 
@@ -57,6 +50,7 @@
           <label for="quality">Quality</label>
           <select id="quality"></select>
         </div>
+
         <div>
           <label for="fileType">File type</label>
           <select id="fileType">
@@ -67,13 +61,17 @@
         </div>
       </section>
 
-      <section
-        id="progressWrap"
-        class="progress-wrap hidden"
-        aria-live="polite"
-      >
+      <section id="playlistProgress" class="playlist-progress hidden">
+        <div class="playlist-head">
+          <strong>Playlist downloads</strong>
+          <span id="playlistCount">0 / 0</span>
+        </div>
+        <div id="playlistItems"></div>
+      </section>
+
+      <section id="progressWrap" class="progress-wrap hidden" aria-live="polite">
         <div class="progress-top">
-          <strong id="progressMessage">Downloading Start...</strong>
+          <strong id="progressMessage">Starting...</strong>
           <strong id="progressPercent">0%</strong>
         </div>
         <div class="progress-track">
@@ -82,10 +80,11 @@
         <div id="progressMeta" class="progress-meta">Preparing...</div>
       </section>
 
-      <button id="downloadBtn" class="download hidden">Download</button>
-      <p class="sub2">Built with ❤️ by Addhyan</p>
+      <button id="downloadBtn" class="download hidden" type="button">Download</button>
 
+      <p class="sub2">Built with ❤️ by Addhyan</p>
     </main>
+
     <script src="/static/app.js"></script>
   </body>
 </html>
