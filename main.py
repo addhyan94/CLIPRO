@@ -56,8 +56,10 @@ def get_info(url: str):
         "no_warnings": True,
         "skip_download": True,
         "js_runtimes": {
-            "deno": "/root/.deno/bin/deno"
-        },
+    "deno": {
+        "path": "/root/.deno/bin/deno"
+    }
+},
     }
 
     with yt_dlp.YoutubeDL(opts) as ydl:
