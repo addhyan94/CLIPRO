@@ -55,8 +55,11 @@ def get_info(url: str):
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        "noplaylist": False,
+        "js_runtimes": {
+            "deno": "/root/.deno/bin/deno"
+        },
     }
+
     with yt_dlp.YoutubeDL(opts) as ydl:
         return ydl.extract_info(url, download=False)
 
