@@ -1,10 +1,10 @@
 from pathlib import Path
 import asyncio
 import re
-import uuid
-import threading
 import shutil
 import tempfile
+import threading
+import uuid
 import zipfile
 
 import yt_dlp
@@ -16,17 +16,24 @@ from starlette.background import BackgroundTask
 
 
 BASE = Path(__file__).resolve().parent
+STATIC_DIR = BASE / "static"
+
+# yt-dlp uses an external JS runtime for modern YouTube extraction.
+# Works both locally and inside the Docker image.
+DENO = shutil.which("deno")
+if not DENO:
+    candidate = Path("/root/.deno/bin/deno")
+    if candidate.exists():
+        DENO = str(candidate)
 
 FFMPEG = shutil.which("ffmpeg")
-if not FFMPEG:
-    print("WARNING: FFmpeg not found. Install it with:")
-    print("sudo apt install ffmpeg")
 
-app = FastAPI(title="Media Downloader")
-app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
+app = FastAPI(title="CLIPRO", version="1.0")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-# In-memory job store for the local version.
-jobs = {}
+# This is intentionally in-memory for the single-process deployment.
+# For multi-instance production, move jobs to Redis/Key Value + a worker.
+jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
 
 
@@ -41,7 +48,7 @@ class DownloadRequest(BaseModel):
 
 
 def valid_url(url: str) -> bool:
-    return bool(re.match(r"^https?://", url.strip(), re.I))
+    return bool(re.match(r"^https?://", url.strip(), re.IGNORECASE))
 
 
 def clean_filename(name: str) -> str:
@@ -50,18 +57,42 @@ def clean_filename(name: str) -> str:
     return name[:180] or "download"
 
 
-def get_info(url: str):
+def ytdlp_base_options() -> dict:
     opts = {
         "quiet": True,
         "no_warnings": True,
-        "skip_download": True,
-        "js_runtimes": {
-    "deno": {
-        "path": "/root/.deno/bin/deno"
-    }
-},
+        "noplaylist": True,
     }
 
+    if DENO:
+        opts["js_runtimes"] = {"deno": {"path": DENO}}
+
+    return opts
+
+
+def ytdlp_download_options() -> dict:
+    opts = ytdlp_base_options()
+    opts.update(
+        {
+            "continuedl": True,
+            "retries": 10,
+            "fragment_retries": 10,
+            "file_access_retries": 3,
+            "concurrent_fragment_downloads": 4,
+            "ffmpeg_location": FFMPEG,
+        }
+    )
+    return opts
+
+
+def get_info(url: str):
+    opts = ytdlp_base_options()
+    opts.update(
+        {
+            "skip_download": True,
+            "noplaylist": False,
+        }
+    )
     with yt_dlp.YoutubeDL(opts) as ydl:
         return ydl.extract_info(url, download=False)
 
@@ -77,18 +108,21 @@ def get_job(job_id: str):
         return dict(job) if job else None
 
 
-def format_bytes(value):
-    if not value:
-        return 0
-    return int(value)
+def format_bytes(value) -> int:
+    return int(value or 0)
 
 
-def make_item_from_info(entry, index):
+def make_item_from_info(entry, index: int):
     title = clean_filename(entry.get("title") or f"Video {index}")
+    thumbnail = entry.get("thumbnail")
+
+    if not thumbnail and entry.get("thumbnails"):
+        thumbnail = entry["thumbnails"][-1].get("url")
+
     return {
         "index": index,
         "title": title,
-        "thumbnail": entry.get("thumbnail"),
+        "thumbnail": thumbnail,
         "status": "queued",
         "percent": 0,
         "size": 0,
@@ -97,12 +131,10 @@ def make_item_from_info(entry, index):
     }
 
 
-def progress_hook(job_id):
+def progress_hook(job_id: str):
     def hook(data):
         state = data.get("status")
         info = data.get("info_dict") or {}
-
-        # Playlist position. yt-dlp normally provides playlist_index here.
         playlist_index = info.get("playlist_index") or data.get("playlist_index")
 
         if state == "downloading":
@@ -114,35 +146,18 @@ def progress_hook(job_id):
             downloaded = data.get("downloaded_bytes") or 0
             percent = (downloaded / total * 100) if total else 0
 
-            speed = data.get("speed") or 0
-            eta = data.get("eta")
-
             update_job(
                 job_id,
                 status="downloading",
                 percent=max(0, min(99, percent)),
                 downloaded=downloaded,
                 total=total,
-                speed=speed,
-                eta=eta,
+                speed=data.get("speed") or 0,
+                eta=data.get("eta"),
                 current_title=info.get("title") or "Downloading...",
                 current_index=playlist_index,
                 message="Downloading video/audio...",
             )
-
-            if playlist_index:
-                with jobs_lock:
-                    job = jobs.get(job_id)
-                    if job and isinstance(job.get("items"), list):
-                        for item in job["items"]:
-                            if item.get("index") == playlist_index:
-                                item["status"] = "downloading"
-                                item["percent"] = round(max(0, min(99, percent)), 1)
-                                item["size"] = format_bytes(downloaded)
-                                item["message"] = "Downloading..."
-                                if info.get("thumbnail"):
-                                    item["thumbnail"] = info["thumbnail"]
-                                break
 
         elif state == "finished":
             update_job(
@@ -156,7 +171,6 @@ def progress_hook(job_id):
 
 
 def choose_format(quality: str, file_type: str) -> str:
-    # MP3 = audio only.
     if file_type == "mp3":
         return "bestaudio[acodec!=none]/best"
 
@@ -168,22 +182,26 @@ def choose_format(quality: str, file_type: str) -> str:
         video = f"bestvideo[height<={height}][vcodec!=none]"
         fallback = f"best[height<={height}][vcodec!=none]"
 
-    # Explicit video + audio, with a combined-stream fallback.
     return f"{video}+bestaudio[acodec!=none]/{fallback}"
 
 
-def find_downloaded_file(folder: Path, stem: str | None = None):
+def find_downloaded_file(folder: Path):
+    ignored = {
+        ".json",
+        ".description",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".png",
+    }
+
     files = [
-        p for p in folder.rglob("*")
+        p
+        for p in folder.rglob("*")
         if p.is_file()
         and not p.name.endswith((".part", ".ytdl"))
-        and p.suffix.lower() not in {".json", ".description", ".jpg", ".jpeg", ".webp"}
+        and p.suffix.lower() not in ignored
     ]
-
-    if stem:
-        matching = [p for p in files if p.stem == stem]
-        if matching:
-            return max(matching, key=lambda p: p.stat().st_size)
 
     return max(files, key=lambda p: p.stat().st_size) if files else None
 
@@ -203,25 +221,26 @@ def update_playlist_item(job_id: str, index: int, **values):
                 item.update(values)
                 break
 
-        completed = sum(1 for item in items if item.get("status") == "complete")
-        failed = sum(1 for item in items if item.get("status") == "error")
+        completed = sum(item.get("status") == "complete" for item in items)
+        failed = sum(item.get("status") == "error" for item in items)
+        current = next(
+            (item for item in items if item.get("status") in {"downloading", "processing"}),
+            None,
+        )
 
         job["completed_count"] = completed
         job["failed_count"] = failed
         job["total_count"] = len(items)
 
         if items:
-            # Completed videos count fully; current video contributes its percentage.
-            current = next(
-                (item for item in items if item.get("status") == "downloading"),
-                None,
-            )
             current_percent = float(current.get("percent", 0)) if current else 0
-            overall = ((completed + current_percent / 100) / len(items)) * 100
-            job["percent"] = round(min(99, overall), 1)
+            job["percent"] = round(
+                min(99, ((completed + current_percent / 100) / len(items)) * 100),
+                1,
+            )
 
 
-def playlist_progress_hook(job_id):
+def playlist_progress_hook(job_id: str):
     def hook(data):
         state = data.get("status")
         info = data.get("info_dict") or {}
@@ -278,17 +297,14 @@ def playlist_progress_hook(job_id):
 
 
 def prepare_playlist(url: str):
-    """
-    Read playlist entries without downloading media.
-    Flat extraction keeps this step reasonably fast and avoids downloading twice.
-    """
-    opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "extract_flat": "in_playlist",
-        "noplaylist": False,
-    }
+    opts = ytdlp_base_options()
+    opts.update(
+        {
+            "skip_download": True,
+            "extract_flat": "in_playlist",
+            "noplaylist": False,
+        }
+    )
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -296,16 +312,9 @@ def prepare_playlist(url: str):
     entries = list(info.get("entries") or [])
     items = []
 
-    for i, entry in enumerate(entries, start=1):
-        if not entry:
-            continue
-
-        item = make_item_from_info(entry, i)
-
-        if not item.get("thumbnail"):
-            item["thumbnail"] = entry.get("thumbnails", [{}])[-1].get("url") if entry.get("thumbnails") else None
-
-        items.append(item)
+    for index, entry in enumerate(entries, start=1):
+        if entry:
+            items.append(make_item_from_info(entry, index))
 
     return info, items
 
@@ -317,35 +326,25 @@ def download_single(
     file_type: str,
     job_dir: Path,
 ):
-    with yt_dlp.YoutubeDL(
-        {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "noplaylist": True,
-        }
-    ) as ydl:
+    probe_opts = ytdlp_base_options()
+    probe_opts["noplaylist"] = True
+
+    with yt_dlp.YoutubeDL(probe_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
     title = clean_filename(info.get("title", "download"))
-
     base_output = job_dir / f"{job_id}.%(ext)s"
 
-    opts = {
-        "format": choose_format(quality, file_type),
-        "outtmpl": str(base_output),
-        "noplaylist": True,
-        "progress_hooks": [progress_hook(job_id)],
-        "quiet": True,
-        "no_warnings": True,
-        "ffmpeg_location": FFMPEG,
-        "continuedl": True,
-        "retries": 10,
-        "fragment_retries": 10,
-    }
-
-    if file_type in {"mp4", "mkv"}:
-        opts["merge_output_format"] = file_type
+    opts = ytdlp_download_options()
+    opts.update(
+        {
+            "format": choose_format(quality, file_type),
+            "outtmpl": str(base_output),
+            "noplaylist": True,
+            "progress_hooks": [progress_hook(job_id)],
+            "merge_output_format": file_type if file_type in {"mp4", "mkv"} else None,
+        }
+    )
 
     if file_type == "mp3":
         opts["postprocessors"] = [
@@ -360,7 +359,7 @@ def download_single(
         job_id,
         title=title,
         thumbnail=info.get("thumbnail"),
-        uploader=info.get("uploader") or info.get("channel"),
+        uploader=info.get("uploader") or info.get("channel") or "Unknown",
         status="downloading",
         percent=0,
         message="Downloading video/audio...",
@@ -370,9 +369,8 @@ def download_single(
         ydl.download([url])
 
     source = find_downloaded_file(job_dir)
-
     if not source:
-        raise RuntimeError("Download finished but output file was not found.")
+        raise RuntimeError("Download finished but the output file was not found.")
 
     final_path = job_dir / f"{title}.{file_type}"
 
@@ -416,9 +414,7 @@ def download_playlist(
     if not items:
         raise RuntimeError("No downloadable videos were found in this playlist.")
 
-    playlist_title = clean_filename(
-        playlist_info.get("title") or "Playlist"
-    )
+    playlist_title = clean_filename(playlist_info.get("title") or "Playlist")
 
     update_job(
         job_id,
@@ -436,24 +432,20 @@ def download_playlist(
     playlist_dir = job_dir / playlist_title
     playlist_dir.mkdir(parents=True, exist_ok=True)
 
-    opts = {
-        "format": choose_format(quality, file_type),
-        "outtmpl": str(playlist_dir / "%(playlist_index)03d - %(title)s.%(ext)s"),
-        "noplaylist": False,
-        "progress_hooks": [playlist_progress_hook(job_id)],
-        "quiet": True,
-        "no_warnings": True,
-        "ffmpeg_location": FFMPEG,
-        "continuedl": True,
-        "retries": 10,
-        "fragment_retries": 10,
-        "ignoreerrors": True,
-        "writethumbnail": False,
-        "writeinfojson": False,
-    }
-
-    if file_type in {"mp4", "mkv"}:
-        opts["merge_output_format"] = file_type
+    opts = ytdlp_download_options()
+    opts.update(
+        {
+            "format": choose_format(quality, file_type),
+            "outtmpl": str(playlist_dir / "%(playlist_index)03d - %(title)s.%(ext)s"),
+            "noplaylist": False,
+            "progress_hooks": [playlist_progress_hook(job_id)],
+            "ignoreerrors": True,
+            "writethumbnail": False,
+            "writeinfojson": False,
+            "windowsfilenames": True,
+            "merge_output_format": file_type if file_type in {"mp4", "mkv"} else None,
+        }
+    )
 
     if file_type == "mp3":
         opts["postprocessors"] = [
@@ -467,30 +459,21 @@ def download_playlist(
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
 
-    # Inspect actual files after yt-dlp has finished each entry.
-    # This also catches entries whose progress hook did not expose all metadata.
+    allowed = {".mp3", ".mp4", ".mkv", ".webm", ".m4a", ".opus"}
     downloaded_files = [
         p for p in playlist_dir.rglob("*")
         if p.is_file()
         and not p.name.endswith((".part", ".ytdl"))
-        and p.suffix.lower() in {".mp3", ".mp4", ".mkv", ".webm", ".m4a", ".opus"}
+        and p.suffix.lower() in allowed
     ]
-
-    used = set()
 
     for item in items:
         index = item["index"]
         prefix = f"{index:03d} - "
-
-        candidates = [
-            p for p in downloaded_files
-            if p.name.startswith(prefix)
-        ]
+        candidates = [p for p in downloaded_files if p.name.startswith(prefix)]
 
         if candidates:
             path = max(candidates, key=lambda p: p.stat().st_size)
-            used.add(path)
-
             update_playlist_item(
                 job_id,
                 index,
@@ -500,7 +483,7 @@ def download_playlist(
                 filename=path.name,
                 message="Completed",
             )
-        elif item.get("status") not in {"complete"}:
+        else:
             update_playlist_item(
                 job_id,
                 index,
@@ -527,23 +510,22 @@ def download_playlist(
     zip_name = f"{playlist_title}.zip"
     zip_path = job_dir / zip_name
 
-    # Put the playlist folder itself inside the ZIP.
     with zipfile.ZipFile(
         zip_path,
         mode="w",
         compression=zipfile.ZIP_DEFLATED,
         compresslevel=6,
-    ) as zf:
+    ) as archive:
         for path in playlist_dir.rglob("*"):
             if path.is_file():
-                zf.write(path, arcname=path.relative_to(job_dir))
+                archive.write(path, arcname=path.relative_to(job_dir))
 
     zip_size = zip_path.stat().st_size
-
-    if failed:
-        message = f"Playlist complete: {completed} downloaded, {failed} failed."
-    else:
-        message = f"Playlist complete: {completed}/{len(items)} downloaded."
+    message = (
+        f"Playlist complete: {completed} downloaded, {failed} failed."
+        if failed
+        else f"Playlist complete: {completed}/{len(items)} downloaded."
+    )
 
     update_job(
         job_id,
@@ -556,23 +538,22 @@ def download_playlist(
         downloaded=zip_size,
         speed=0,
         eta=0,
-        completed_count=completed,
-        failed_count=failed,
     )
 
 
-def run_download(job_id: str, url: str, quality: str, file_type: str):
+def run_download(
+    job_id: str,
+    url: str,
+    quality: str,
+    file_type: str,
+):
     job_dir = None
 
     try:
         if not FFMPEG:
-            raise RuntimeError(
-                "FFmpeg is not installed. Run: sudo apt install ffmpeg"
-            )
+            raise RuntimeError("FFmpeg is not installed.")
 
-        job_dir = Path(
-            tempfile.mkdtemp(prefix=f"media_{job_id}_")
-        )
+        job_dir = Path(tempfile.mkdtemp(prefix=f"clipro_{job_id}_"))
 
         update_job(
             job_id,
@@ -581,47 +562,26 @@ def run_download(job_id: str, url: str, quality: str, file_type: str):
             message="Reading URL...",
         )
 
-        # Detect whether the URL resolves to a playlist/channel collection.
-        # We only use this for classification; actual playlist preparation
-        # happens inside download_playlist().
-        try:
-            probe_opts = {
-                "quiet": True,
-                "no_warnings": True,
-                "skip_download": True,
+        probe_opts = ytdlp_base_options()
+        probe_opts.update(
+            {
                 "extract_flat": "in_playlist",
                 "noplaylist": False,
+                "skip_download": True,
             }
+        )
 
-            with yt_dlp.YoutubeDL(probe_opts) as ydl:
-                probe = ydl.extract_info(url, download=False)
+        with yt_dlp.YoutubeDL(probe_opts) as ydl:
+            probe = ydl.extract_info(url, download=False)
 
-            entries = list(probe.get("entries") or [])
-
-        except Exception:
-            # If probing fails, let the single-download path produce the
-            # original yt-dlp error message.
-            entries = []
-
-        is_playlist = bool(entries) and len(entries) > 1
+        entries = list(probe.get("entries") or [])
+        is_playlist = len(entries) > 1
 
         if is_playlist:
-            download_playlist(
-                job_id,
-                url,
-                quality,
-                file_type,
-                job_dir,
-            )
+            download_playlist(job_id, url, quality, file_type, job_dir)
         else:
             update_job(job_id, kind="single")
-            download_single(
-                job_id,
-                url,
-                quality,
-                file_type,
-                job_dir,
-            )
+            download_single(job_id, url, quality, file_type, job_dir)
 
     except Exception as exc:
         if job_dir and job_dir.exists():
@@ -635,9 +595,19 @@ def run_download(job_id: str, url: str, quality: str, file_type: str):
         )
 
 
+@app.get("/healthz")
+def healthz():
+    return {
+        "status": "ok",
+        "yt_dlp": getattr(yt_dlp.version, "__version__", "unknown"),
+        "deno": bool(DENO),
+        "ffmpeg": bool(FFMPEG),
+    }
+
+
 @app.get("/")
 def home():
-    return FileResponse(BASE / "static" / "index.html")
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.post("/api/analyze")
@@ -649,15 +619,10 @@ async def analyze(req: AnalyzeRequest):
 
     try:
         info = await asyncio.to_thread(get_info, url)
-
         entries = list(info.get("entries") or [])
-        is_playlist = bool(entries)
 
-        if is_playlist:
-            # For playlists, expose the playlist title/count and first
-            # available thumbnail without returning every stream format.
-            first = next((e for e in entries if e), {}) or {}
-
+        if entries:
+            first = next((entry for entry in entries if entry), {}) or {}
             return {
                 "kind": "playlist",
                 "title": info.get("title", "Playlist"),
@@ -674,9 +639,9 @@ async def analyze(req: AnalyzeRequest):
         formats = info.get("formats") or []
         heights = sorted(
             {
-                int(f["height"])
-                for f in formats
-                if f.get("height") and f.get("vcodec") != "none"
+                int(fmt["height"])
+                for fmt in formats
+                if fmt.get("height") and fmt.get("vcodec") != "none"
             }
         )
 
@@ -710,7 +675,9 @@ async def start_download(req: DownloadRequest):
 
     if quality != "best":
         try:
-            int(quality.rstrip("p"))
+            height = int(quality.rstrip("p"))
+            if height <= 0:
+                raise ValueError
         except ValueError:
             raise HTTPException(400, "Invalid quality.")
 
@@ -756,7 +723,6 @@ def cleanup_download(path: Path):
         if path.exists():
             path.unlink()
 
-        # Remove the complete temporary job directory too.
         if path.parent.exists():
             shutil.rmtree(path.parent, ignore_errors=True)
     except Exception:
@@ -775,10 +741,15 @@ def get_file(job_id: str):
     if not path.exists():
         raise HTTPException(404, "File not found.")
 
+    media_type = (
+        "application/zip"
+        if path.suffix.lower() == ".zip"
+        else "application/octet-stream"
+    )
+
     return FileResponse(
         path,
-        media_type="application/zip" if path.suffix.lower() == ".zip" else "application/octet-stream",
+        media_type=media_type,
         filename=job["filename"],
         background=BackgroundTask(cleanup_download, path),
     )
-
