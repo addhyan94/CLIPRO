@@ -24,6 +24,9 @@ FFPROBE = shutil.which("ffprobe")
 DENO = shutil.which("deno") or ("/root/.deno/bin/deno" if Path("/root/.deno/bin/deno").exists() else None)
 POT_PROVIDER_URL = os.getenv("CLIPRO_POT_PROVIDER_URL", "http://127.0.0.1:4416")
 MAX_JOBS = max(1, int(os.getenv("CLIPRO_MAX_JOBS", "2")))
+# Render-only hardening. Keep this OFF locally so the known-good localhost
+# configuration remains unchanged. Enable with CLIPRO_RENDER_MODE=1 on Render.
+RENDER_MODE = os.getenv("CLIPRO_RENDER_MODE", "0").lower() in {"1", "true", "yes", "on"}
 
 app = FastAPI(title="CLIPRO")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
@@ -60,11 +63,16 @@ def ytdlp_base_options() -> dict:
         "extractor_retries": 5,
         "remote_components": ["ejs:github"],
         "extractor_args": {
+            # Keep the existing PO-token provider for all sites.
             "youtubepot-bgutilhttp": {"base_url": POT_PROVIDER_URL}
         },
     }
     if DENO:
         options["js_runtimes"] = {"deno": {"path": DENO}}
+    if RENDER_MODE:
+        # YouTube's current recommendation is mweb + a PO-token provider.
+        # This is deliberately Render-only; localhost keeps its existing setup.
+        options["extractor_args"]["youtube"] = {"player_client": ["mweb"]}
     return options
 
 
@@ -172,12 +180,25 @@ def progress_hook(job_id: str):
 
 
 def choose_format(quality: str, file_type: str) -> str:
+    # Preserve the exact known-good localhost selectors.
+    if not RENDER_MODE:
+        if file_type == "mp3":
+            return "bestaudio[acodec!=none]/best"
+        if quality == "best":
+            return "bestvideo[vcodec!=none]+bestaudio[acodec!=none]/best[vcodec!=none]"
+        height = int(quality.rstrip("p"))
+        return f"bestvideo[height<={height}][vcodec!=none]+bestaudio[acodec!=none]/best[height<={height}][vcodec!=none]"
+
+    # Render: be less restrictive about Instagram/Facebook codec metadata.
+    # Some server-side extractor responses expose a valid audio stream without
+    # a populated acodec field; the strict local selector can therefore fall
+    # back to a video-only format.
     if file_type == "mp3":
-        return "bestaudio[acodec!=none]/best"
+        return "bestaudio/best"
     if quality == "best":
-        return "bestvideo[vcodec!=none]+bestaudio[acodec!=none]/best[vcodec!=none]"
+        return "bestvideo[vcodec!=none]+bestaudio/best[vcodec!=none]"
     height = int(quality.rstrip("p"))
-    return f"bestvideo[height<={height}][vcodec!=none]+bestaudio[acodec!=none]/best[height<={height}][vcodec!=none]"
+    return f"bestvideo[height<={height}][vcodec!=none]+bestaudio/best[height<={height}][vcodec!=none]"
 
 
 def media_files(folder: Path):
@@ -432,6 +453,7 @@ def healthz():
         "ffprobe": bool(FFPROBE),
         "deno": bool(DENO),
         "pot_provider": POT_PROVIDER_URL,
+        "render_mode": RENDER_MODE,
         "yt_dlp": yt_dlp.version.__version__,
     }
 
